@@ -264,28 +264,16 @@ function estateStats(db, estateId, year) {
 
 /* ── Year-by-year finance ── */
 const inScopeIds = ids => r => ids.indexOf(r.estateId) > -1;
-// Lease-based income: the lease's monthly charge for every month it covered (up to this month), plus late fees by "for month"
+// Income = recorded payments (deposits excluded), counted in the month they were FOR (the payment's "For month"),
+// falling back to the date received when no month is set.
+const payMonth = p => (p.period || d10(p.date).slice(0, 7));
 function leaseIncome(db, ids, prefix) {
-  const f = inScopeIds(ids), now = ymNow();
-  const months = prefix.length === 7 ? [prefix] : Array.from({ length: 12 }, (_, i) => prefix + "-" + pad(i + 1));
-  const leases = db.leases.filter(f);
-  let total = 0;
-  months.forEach(ym => {
-    if (ym > now) return;
-    leases.forEach(l => { if (leaseCoversMonth(l, ym)) total += monthlyCharge(l); });
-  });
-  total += sum(db.payments.filter(f).filter(p => CONFIG.nonRentTypes.indexOf(p.type) > -1 && (p.period || d10(p.date).slice(0, 7)).indexOf(prefix) === 0), p => num(p.amount));
-  return total;
+  const f = inScopeIds(ids);
+  return sum(db.payments.filter(f).filter(p => !isDeposit(p) && payMonth(p).indexOf(prefix) === 0), p => num(p.amount));
 }
 function financeYears(db, ids) {
   const f = inScopeIds(ids), set = {};
-  const nowY = +today().slice(0, 4);
-  db.leases.filter(f).forEach(l => {
-    const a = +d10(l.startDate).slice(0, 4); if (!a) return;
-    const endS = d10(l.moveOutDate) || (l.monthToMonth === "Yes" ? "" : d10(l.endDate));
-    const b = Math.min(endS ? +endS.slice(0, 4) : nowY, nowY);
-    for (let y = a; y <= b; y++) set[y] = 1;
-  });
+  db.payments.filter(f).filter(p => !isDeposit(p)).forEach(p => { const y = payMonth(p).slice(0, 4); if (y) set[y] = 1; });
   db.expenses.filter(f).forEach(x => { const y = d10(x.date).slice(0, 4); if (y) set[y] = 1; });
   set[today().slice(0, 4)] = 1;
   return Object.keys(set).sort().reverse();
@@ -931,7 +919,7 @@ function FinancePanel({ ids, year, setYear, title }) {
         e("div", { className: "hide-sm", style: { display: "flex", flexWrap: "wrap", gap: "2px 12px", fontSize: 11.5, color: "var(--muted)", fontWeight: 600, alignItems: "center" } },
           e("span", { style: { whiteSpace: "nowrap" } }, e("span", { style: { display: "inline-block", width: 10, height: 6, borderRadius: 2, background: "var(--ink)", marginRight: 5 } }), "Income"),
           e("span", { style: { whiteSpace: "nowrap" } }, e("span", { style: { display: "inline-block", width: 10, height: 6, borderRadius: 2, background: "var(--red)", marginRight: 5 } }), "Expenses")))),
-    e("div", { style: Object.assign({}, S.small, { marginTop: 8 }) }, "Income is lease rent for each month a lease was in effect (through this month), plus late fees. Deposits are excluded. " + (mode === "years" ? "Tap a year to show it in the cards above." : "")));
+    e("div", { style: Object.assign({}, S.small, { marginTop: 8 }) }, "Income is recorded payments, counted in the month they were for. Deposits are excluded. " + (mode === "years" ? "Tap a year to show it in the cards above." : "")));
 }
 
 function PortfolioOverview() {
