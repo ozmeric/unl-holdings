@@ -244,8 +244,8 @@ function rentStatus(l, ym, due, paid) {
   return ["Upcoming", "muted"];
 }
 
-function estateStats(db, estateId) {
-  const ym = ymNow(), yr = ym.slice(0, 4);
+function estateStats(db, estateId, year) {
+  const ym = ymNow(), yr = year || ym.slice(0, 4);
   const props = db.properties.filter(p => p.estateId === estateId);
   const leases = db.leases.filter(l => l.estateId === estateId);
   const occupied = props.filter(p => leases.some(l => l.propertyId === p.id && isOccupying(l))).length;
@@ -260,6 +260,22 @@ function estateStats(db, estateId) {
     income, expenses, noi: income - expenses,
     deposits: sum(leases.filter(l => leaseState(l) !== "Ended"), l => sum(pays.filter(p => p.leaseId === l.id && isDeposit(p)), p => num(p.amount))),
   };
+}
+
+/* ── Year-by-year finance ── */
+const inScopeIds = ids => r => ids.indexOf(r.estateId) > -1;
+function financeYears(db, ids) {
+  const f = inScopeIds(ids), set = {};
+  db.payments.filter(f).filter(p => !isDeposit(p)).forEach(p => { const y = d10(p.date).slice(0, 4); if (y) set[y] = 1; });
+  db.expenses.filter(f).forEach(x => { const y = d10(x.date).slice(0, 4); if (y) set[y] = 1; });
+  set[today().slice(0, 4)] = 1;
+  return Object.keys(set).sort().reverse();
+}
+function periodFinance(db, ids, prefix) {
+  const f = inScopeIds(ids), m = r => d10(r.date).indexOf(prefix) === 0;
+  const income = sum(db.payments.filter(f).filter(p => !isDeposit(p) && m(p)), p => num(p.amount));
+  const expenses = sum(db.expenses.filter(f).filter(m), x => num(x.amount));
+  return { income, expenses, net: income - expenses };
 }
 
 function docStatus(d) {
@@ -855,10 +871,56 @@ function DocumentsPanel({ estateId }) {
 }
 
 /* ── Management (holding company) ────────────────────────────────── */
+function YearPick({ years, value, onChange }) {
+  return e("label", { style: { display: "inline-flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--muted)", fontWeight: 600 } }, "Year",
+    e("select", { value, onChange: ev => onChange(ev.target.value), style: Object.assign({}, S.filter, { fontWeight: 700 }), "aria-label": "Year" },
+      years.map(y => e("option", { key: y, value: y }, y))));
+}
+
+function FinancePanel({ ids, year, setYear, title }) {
+  const app = useApp(); const db = app.db;
+  const [mode, setMode] = useState("years");
+  const years = financeYears(db, ids);
+  const rows = mode === "years"
+    ? years.map(y => Object.assign({ key: y, label: y }, periodFinance(db, ids, y)))
+    : Array.from({ length: 12 }, (_, i) => { const ym = year + "-" + pad(i + 1); return Object.assign({ key: ym, label: ymLabel(ym, true).split(" ")[0] }, periodFinance(db, ids, ym)); })
+        .filter(r => mode === "months" && (r.key <= ymNow() || r.income || r.expenses));
+  const tot = { income: sum(rows, r => r.income), expenses: sum(rows, r => r.expenses) }; tot.net = tot.income - tot.expenses;
+  const max = Math.max(1, ...rows.map(r => Math.max(r.income, r.expenses)));
+  const bar = (v, color) => e("div", { style: { height: 6, borderRadius: 3, background: color, width: Math.max(v > 0 ? 2 : 0, v / max * 100) + "%" } });
+  const cols = "minmax(64px,0.8fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.4fr)";
+  const cell = (v, extra) => e("span", { className: "num", style: Object.assign({ textAlign: "right" }, extra) }, v);
+  return e("div", { style: { marginTop: 22 } },
+    e(PanelHead, { title: title || "Income, expenses & profit", right: e(Fragment, null,
+      e(Seg, { value: mode, onChange: setMode, options: [["years", "By year"], ["months", "Months of " + year]] })) }),
+    e("div", { style: S.card },
+      e("div", { style: { display: "grid", gridTemplateColumns: cols, gap: 10, padding: "10px 16px", borderBottom: "1px solid var(--line)", fontSize: 12, color: "var(--muted)", fontWeight: 600 } },
+        e("span", null, mode === "years" ? "Year" : "Month"), cell("Income"), cell("Expenses"), cell("Profit"), e("span", { className: "hide-sm" }, "")),
+      rows.map(r => {
+        const sel = mode === "years" && r.key === year;
+        return e("div", { key: r.key, className: mode === "years" ? "click" : "", role: mode === "years" ? "button" : undefined, tabIndex: mode === "years" ? 0 : undefined,
+          onClick: mode === "years" ? () => setYear(r.key) : undefined,
+          style: { display: "grid", gridTemplateColumns: cols, gap: 10, alignItems: "center", padding: "11px 16px", borderBottom: "1px solid var(--line)", fontSize: 13.5, background: sel ? "var(--red-soft)" : undefined, boxShadow: sel ? "inset 3px 0 0 var(--red)" : undefined } },
+          e("span", { style: { fontWeight: 800 } }, r.label),
+          cell(money(r.income)), cell(money(r.expenses)),
+          cell(money(r.net), { fontWeight: 800, color: r.net < 0 ? "var(--red)" : "var(--ink)" }),
+          e("div", { className: "hide-sm", style: { display: "grid", gap: 3 }, title: "Income vs expenses" }, bar(r.income, "var(--ink)"), bar(r.expenses, "var(--red)")));
+      }),
+      e("div", { style: { display: "grid", gridTemplateColumns: cols, gap: 10, padding: "12px 16px", fontSize: 13.5, fontWeight: 800 } },
+        e("span", null, mode === "years" ? "All years" : year + " total"), cell(money(tot.income)), cell(money(tot.expenses)),
+        cell(money(tot.net), { color: tot.net < 0 ? "var(--red)" : "var(--ink)" }),
+        e("div", { className: "hide-sm", style: { display: "flex", flexWrap: "wrap", gap: "2px 12px", fontSize: 11.5, color: "var(--muted)", fontWeight: 600, alignItems: "center" } },
+          e("span", { style: { whiteSpace: "nowrap" } }, e("span", { style: { display: "inline-block", width: 10, height: 6, borderRadius: 2, background: "var(--ink)", marginRight: 5 } }), "Income"),
+          e("span", { style: { whiteSpace: "nowrap" } }, e("span", { style: { display: "inline-block", width: 10, height: 6, borderRadius: 2, background: "var(--red)", marginRight: 5 } }), "Expenses")))),
+    e("div", { style: Object.assign({}, S.small, { marginTop: 8 }) }, "Income is rent and fees received (deposits excluded). " + (mode === "years" ? "Tap a year to show it in the cards above." : "")));
+}
+
 function PortfolioOverview() {
   const app = useApp(); const db = app.db;
-  const ym = ymNow(), yr = ym.slice(0, 4);
-  const rows = db.estates.map(es => ({ es, st: estateStats(db, es.id) }));
+  const ym = ymNow();
+  const [yr, setYr] = useState(today().slice(0, 4));
+  const allIds = db.estates.map(x => x.id).concat([HOLDING]);
+  const rows = db.estates.map(es => ({ es, st: estateStats(db, es.id, yr) }));
   const T = k => sum(rows, r => r.st[k]);
   const holdingExp = sum(db.expenses.filter(x => x.estateId === HOLDING && d10(x.date).slice(0, 4) === yr), x => num(x.amount));
   const net = T("noi") - holdingExp;
@@ -871,6 +933,7 @@ function PortfolioOverview() {
       e(Kpi, { label: "Rent roll, " + ymLabel(ym, true), value: money(rr) }),
       e(Kpi, { label: "Collected, " + ymLabel(ym, true), value: money(col), sub: rr ? Math.round(col / rr * 100) + "% of rent roll" : null }),
       e(Kpi, { label: yr + " net income", value: money(net), neg: net < 0, sub: "After " + money(holdingExp) + " holding costs" })),
+    e("div", { style: { display: "flex", justifyContent: "flex-end", margin: "-6px 0 14px" } }, e(YearPick, { years: financeYears(db, allIds), value: yr, onChange: setYr })),
     e("div", { className: "g-2" },
       e("div", null, e(PanelHead, { title: "Needs attention" }), e(AlertList, { alerts, limit: 8 })),
       e("div", null,
@@ -886,7 +949,7 @@ function PortfolioOverview() {
             e("span", { className: "num hide-sm", style: { textAlign: "right" } }, money(st.collected)),
             e("span", { className: "num hide-sm", style: { textAlign: "right", fontWeight: 700, color: st.noi < 0 ? "var(--red)" : "var(--ink)" } }, money(st.noi)))))
           : e(Empty, { title: "No LLCs yet", text: "Add the first estate LLC owned by " + CONFIG.companyName + ".", action: e(Btn, { onClick: () => app.openForm("estate") }, "Add LLC") }))),
-    null);
+    e(FinancePanel, { ids: allIds, year: yr, setYear: setYr, title: "Portfolio income, expenses & profit" }));
 }
 
 function ManagementView() {
@@ -1105,8 +1168,8 @@ function MaintenancePanel({ estate }) {
 
 function EstateOverview({ estate }) {
   const app = useApp(); const db = app.db;
-  const st = estateStats(db, estate.id);
-  const yr = today().slice(0, 4);
+  const [yr, setYr] = useState(today().slice(0, 4));
+  const st = estateStats(db, estate.id, yr);
   const alerts = buildAlerts(db, estate.id);
   return e(Fragment, null,
     e("div", { className: "grid g-kpi" },
@@ -1116,8 +1179,9 @@ function EstateOverview({ estate }) {
       e(Kpi, { label: yr + " expenses", value: money(st.expenses) }),
       e(Kpi, { label: yr + " net income", value: money(st.noi), neg: st.noi < 0 }),
       e(Kpi, { label: "Deposits held", value: money(st.deposits) })),
+    e("div", { style: { display: "flex", justifyContent: "flex-end", margin: "-6px 0 14px" } }, e(YearPick, { years: financeYears(db, [estate.id]), value: yr, onChange: setYr })),
     e("div", { className: "g-2" },
-      e("div", null, e(PanelHead, { title: "Needs attention" }), e(AlertList, { alerts })),
+      e("div", null, e(PanelHead, { title: "Needs attention" }), e(AlertList, { alerts }), e(FinancePanel, { ids: [estate.id], year: yr, setYear: setYr })),
       e("div", null,
         e(PanelHead, { title: "Entity details", right: e(Btn, { kind: "ghost", small: true, onClick: () => app.openForm("estate", estate) }, "Edit") }),
         e("div", { style: Object.assign({}, S.card, { padding: "4px 16px" }) },
