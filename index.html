@@ -148,7 +148,7 @@ const CONFIG = {
   documentTypes: [
     "Operating Agreement", "Articles of Organization", "EIN Letter", "Annual Registration",
     "Insurance Policy", "Lease Agreement", "Deed", "Loan Documents", "HOA Documents",
-    "Tax Return", "Inspection Report", "Other",
+    "Tax Return", "Inspection Report", "Closing Statement", "Other",
   ],
 
   // ── Vendors ──
@@ -261,6 +261,11 @@ function estateStats(db, estateId, year) {
     deposits: sum(leases.filter(l => leaseState(l) !== "Ended"), l => sum(pays.filter(p => p.leaseId === l.id && isDeposit(p)), p => num(p.amount))),
   };
 }
+
+/* ── Acquisition ── */
+const hasClosing = p => num(p.purchasePrice) > 0 && (num(p.loanAmount) > 0 || num(p.closingCosts) > 0 || num(p.cashAtClosing) > 0);
+const cashInvested = p => num(p.purchasePrice) + num(p.closingCosts) - num(p.loanAmount) - num(p.sellerCredits) - num(p.lenderCredits);
+function closingItems(p) { try { const a = JSON.parse(p.closingItems || "[]"); return Array.isArray(a) ? a : []; } catch (err) { return []; } }
 
 /* ── Year-by-year finance ── */
 const inScopeIds = ids => r => ids.indexOf(r.estateId) > -1;
@@ -475,9 +480,19 @@ const SCHEMAS = {
       { k: "baths", label: "Bathrooms", type: "number" },
       { k: "sqft", label: "Square feet", type: "number" },
       { k: "marketRent", label: "Target rent", type: "money" },
-      { type: "section", label: "Acquisition" },
+      { type: "section", label: "Acquisition & financing" },
       { k: "purchaseDate", label: "Purchase / closing date", type: "date" },
       { k: "purchasePrice", label: "Purchase price", type: "money" },
+      { k: "loanAmount", label: "Loan amount", type: "money" },
+      { k: "lender", label: "Lender" },
+      { k: "interestRate", label: "Interest rate (%)", type: "number" },
+      { k: "closingCosts", label: "Closing costs & prepaids", type: "money" },
+      { k: "sellerCredits", label: "Seller credits", type: "money" },
+      { k: "lenderCredits", label: "Lender credits", type: "money" },
+      { k: "earnestMoney", label: "Earnest money deposit", type: "money" },
+      { k: "otherFunds", label: "Other funds brought (gift, etc.)", type: "money" },
+      { k: "cashAtClosing", label: "Cash due at closing", type: "money" },
+      { k: "titleCompany", label: "Title / settlement agent" },
       { type: "section", label: "Monthly carrying costs" },
       { k: "mortgage", label: "Mortgage (P&I)", type: "money" },
       { k: "hoa", label: "HOA dues", type: "money" },
@@ -1004,6 +1019,55 @@ function EstatesView() {
       : e(Empty, { title: "No estate LLCs yet", text: "Each LLC gets its own properties, leases, rent ledger, expenses, maintenance, tasks and documents.", action: e(Btn, { onClick: () => app.openForm("estate") }, "Add your first LLC") }));
 }
 
+function ClosingDetail({ propertyId, onClose }) {
+  const app = useApp(); const db = app.db;
+  const p = db.properties.find(x => x.id === propertyId);
+  if (!p) return null;
+  const price = num(p.purchasePrice), loan = num(p.loanAmount), cc = num(p.closingCosts);
+  const credits = num(p.sellerCredits) + num(p.lenderCredits);
+  const invested = cashInvested(p);
+  const items = closingItems(p);
+  const groups = []; items.forEach(it => { let g = groups.find(x => x.name === it.group); if (!g) { g = { name: it.group, rows: [] }; groups.push(g); } g.rows.push(it); });
+  const itemTotal = sum(items, it => num(it.amount));
+  const funding = [["Earnest money deposit", p.earnestMoney], ["Other funds (gift, etc.)", p.otherFunds], ["Due at closing", p.cashAtClosing]].filter(r => num(r[1]));
+  const fundingTotal = sum(funding, r => num(r[1]));
+  const sec = (title, kids, right) => e("div", { style: { marginBottom: 22 } },
+    e("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 2 } },
+      e("div", { style: { fontWeight: 800, color: "var(--red)", fontSize: 13.5 } }, title),
+      right ? e("div", { className: "num", style: { fontWeight: 800, fontSize: 13.5 } }, right) : null), kids);
+  const line = (k, v, opts) => e("div", { key: k, style: { padding: "8px 0", borderBottom: "1px solid var(--line)", display: "flex", justifyContent: "space-between", gap: 14, fontWeight: opts && opts.bold ? 800 : 400 } },
+    e("div", { style: { minWidth: 0 } }, e("div", { style: { fontSize: 13.5 } }, k), opts && opts.sub ? e("div", { style: S.small }, opts.sub) : null),
+    e("span", { className: "num", style: { fontWeight: opts && opts.bold ? 800 : 600, fontSize: 13.5, whiteSpace: "nowrap", color: opts && opts.neg ? "var(--red)" : "inherit" } }, v));
+  return e(Modal, {
+    title: "Purchase closing", onClose, wide: true,
+    footer: e(Btn, { kind: "ghost", onClick: () => app.openForm("property", p) }, "Edit figures"),
+  },
+    e("div", { style: { color: "var(--muted)", fontSize: 13.5, marginBottom: 16 } }, propLabel(p) + ", closed " + fmtDate(p.purchaseDate) + (p.titleCompany ? ", " + p.titleCompany : "")),
+    e("div", { className: "grid", style: { gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", marginBottom: 22 } },
+      e(Kpi, { label: "Purchase price", value: money(price) }),
+      e(Kpi, { label: "Loan", value: money(loan), sub: price ? Math.round(loan / price * 1000) / 10 + "% LTV" + (p.interestRate ? " at " + p.interestRate + "%" : "") : null }),
+      e(Kpi, { label: "Closing costs", value: money(cc), sub: credits ? money(credits) + " covered by credits" : null }),
+      e(Kpi, { label: "Cash invested", value: money(invested), sub: price ? Math.round(invested / price * 1000) / 10 + "% of price" : null })),
+    e("div", { className: "g-2" },
+      e("div", null,
+        sec("Purchase", e(Fragment, null,
+          line("Purchase price", money(price, true)),
+          line("Closing costs & prepaids", money(cc, true)),
+          line("Total cost", money(price + cc, true), { bold: true }),
+          line("Loan" + (p.lender ? " (" + p.lender + ")" : ""), "−" + money(loan, true)),
+          num(p.sellerCredits) ? line("Seller credit", "−" + money(p.sellerCredits, true)) : null,
+          num(p.lenderCredits) ? line("Lender credit", "−" + money(p.lenderCredits, true)) : null,
+          line("Cash invested", money(invested, true), { bold: true }))),
+        funding.length ? sec("Where the cash came from", e(Fragment, null,
+          funding.map(r => line(r[0], money(r[1], true))),
+          line("Total", money(fundingTotal, true), { bold: true }),
+          Math.abs(fundingTotal - invested) > 0.01 ? e("div", { style: Object.assign({}, S.small, { color: "var(--red)", paddingTop: 6 }) }, "Doesn't match cash invested by " + money(fundingTotal - invested, true) + ". Check the figures.") : null)) : null),
+      e("div", null,
+        groups.length ? groups.map(g => sec(g.name, g.rows.map((it, i) => line(it.item, money(it.amount, true), { sub: it.payee, neg: num(it.amount) < 0 })), money(sum(g.rows, it => num(it.amount)), true)))
+          : e("div", { style: S.small }, "No itemized closing statement on file. Add the figures with Edit."),
+        groups.length && Math.abs(itemTotal - cc) > 0.01 ? e("div", { style: Object.assign({}, S.small, { color: "var(--red)" }) }, "Itemized total " + money(itemTotal, true) + " differs from closing costs " + money(cc, true) + ".") : null)));
+}
+
 function PropertiesPanel({ estate }) {
   const app = useApp(); const db = app.db;
   const props = db.properties.filter(p => p.estateId === estate.id);
@@ -1030,9 +1094,13 @@ function PropertiesPanel({ estate }) {
           e(Fact, { label: lease ? "Tenant" : "Target rent", value: lease ? lease.tenantName : money(p.marketRent) }),
           e(Fact, { label: lease ? "Lease ends" : "Purchased", value: lease ? (d10(lease.endDate) ? fmtDate(lease.endDate) : "Open-ended") : fmtDate(p.purchaseDate) }),
           e(Fact, { label: "Monthly rent", value: money(rent) }),
-          e(Fact, { label: "Est. cash flow", value: e("span", { style: { color: rent - carry < 0 ? "var(--red)" : "inherit" } }, carry ? money(rent - carry) + "/mo" : "Add carrying costs") })),
+          e(Fact, { label: !num(p.mortgage) && num(p.loanAmount) ? "Cash flow before mortgage" : "Est. cash flow", value: e("span", { style: { color: rent - carry < 0 ? "var(--red)" : "inherit" } }, carry ? money(rent - carry) + "/mo" : "Add carrying costs") }),
+          hasClosing(p) ? e(Fact, { label: "Cash invested", value: money(cashInvested(p)) }) : null,
+          hasClosing(p) ? e(Fact, { label: "Purchase / loan", value: money(p.purchasePrice) + " / " + money(p.loanAmount) }) : null),
+        carry && !num(p.mortgage) && num(p.loanAmount) ? e("div", { style: Object.assign({}, S.small, { color: "var(--warn)", fontWeight: 600, marginTop: -4 }) }, "Add the mortgage payment with Edit for true cash flow.") : null,
         e("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginTop: "auto" } },
           e(Btn, { small: true, kind: "dark", onClick: () => app.openForm("lease", null, { estateId: estate.id, defaults: { propertyId: p.id, rent: p.marketRent || "" } }) }, "New lease"),
+          hasClosing(p) ? e(Btn, { small: true, kind: "ghost", onClick: () => app.openClosing(p.id) }, "Closing") : null,
           e(Btn, { small: true, kind: "ghost", onClick: () => app.openForm("property", p) }, "Edit"),
           e(Btn, { small: true, kind: "link", onClick: () => ls.length ? app.toast("Delete this property's leases first", true) : app.confirm("Delete " + p.name + "?", () => app.remove("properties", p.id)) }, "Delete")));
     })));
@@ -1185,7 +1253,8 @@ function EstateOverview({ estate }) {
       e(Kpi, { label: yr + " income", value: money(st.income) }),
       e(Kpi, { label: yr + " expenses", value: money(st.expenses) }),
       e(Kpi, { label: yr + " net income", value: money(st.noi), neg: st.noi < 0 }),
-      e(Kpi, { label: "Deposits held", value: money(st.deposits) })),
+      e(Kpi, { label: "Deposits held", value: money(st.deposits) }),
+      (() => { const ps = db.properties.filter(x => x.estateId === estate.id && hasClosing(x)); return ps.length ? e(Kpi, { label: "Cash invested", value: money(sum(ps, cashInvested)), sub: "Equity " + money(sum(ps, x => num(x.purchasePrice) - num(x.loanAmount))) + " at purchase" }) : null; })()),
     e("div", { style: { display: "flex", justifyContent: "flex-end", margin: "-6px 0 14px" } }, e(YearPick, { years: financeYears(db, [estate.id]), value: yr, onChange: setYr })),
     e("div", { className: "g-2" },
       e("div", null, e(PanelHead, { title: "Needs attention" }), e(AlertList, { alerts }), e(FinancePanel, { ids: [estate.id], year: yr, setYear: setYr })),
@@ -1377,11 +1446,12 @@ function App() {
   const openForm = (kind, record, opts) => setModal(Object.assign({ type: "form", kind, record: record || null }, opts || {}));
   const confirm = (text, onYes, yes) => setModal({ type: "confirm", text, onYes, yes });
   const openLease = leaseId => setModal({ type: "lease", leaseId });
+  const openClosing = propertyId => setModal({ type: "closing", propertyId });
   const close = () => setModal(null);
 
   if (!authed) return e(Login, { onUnlock: unlock, busy: loginBusy, error: loginErr });
 
-  const ctx = { db, nav, go, save, remove, removeEstate, lock, openForm, confirm, openLease, toast };
+  const ctx = { db, nav, go, save, remove, removeEstate, lock, openForm, confirm, openLease, openClosing, toast };
   const view = nav.view === "estates" ? e(EstatesView)
     : nav.view === "estate" ? e(EstateView)
     : nav.view === "vendors" ? e(VendorsView)
@@ -1391,6 +1461,7 @@ function App() {
   if (modal && modal.type === "form") modalEl = e(FormModal, { key: modal.kind + (modal.record ? modal.record.id : "new") + (modal.title || ""), kind: modal.kind, record: modal.record, defaults: modal.defaults, estateId: modal.estateId || (modal.record && modal.record.estateId), title: modal.title, onClose: close });
   if (modal && modal.type === "confirm") modalEl = e(ConfirmModal, { text: modal.text, yes: modal.yes, onYes: modal.onYes, onClose: close });
   if (modal && modal.type === "lease") modalEl = e(LeaseDetail, { leaseId: modal.leaseId, onClose: close });
+  if (modal && modal.type === "closing") modalEl = e(ClosingDetail, { propertyId: modal.propertyId, onClose: close });
 
   return e(Ctx.Provider, { value: ctx },
     e("div", { className: "app" },
